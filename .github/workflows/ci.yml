@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --extra dev --python '${{ matrix.python-version }}'
+      - run: make check
+      - run: make demo > demo-output.txt
+      - run: .venv/bin/python scripts/privacy_check.py
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t workspace-agent:ci .
+      - run: docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges workspace-agent:ci

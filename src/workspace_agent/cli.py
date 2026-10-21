@@ -24,6 +24,14 @@ console = Console(markup=False)
 @app.command("init-demo")
 def init_demo(workspace: Path = Path("demo_workspace")) -> None:
     """Create an explicitly authorized demo directory with original public notes."""
+    try:
+        _init_demo(workspace)
+    except (SandboxError, OSError) as exc:
+        console.print(f"初始化失败：{getattr(exc, 'code', type(exc).__name__)}")
+        raise typer.Exit(2) from None
+
+
+def _init_demo(workspace: Path) -> None:
     if workspace.is_symlink() or any(p.is_symlink() for p in workspace.absolute().parents):
         raise typer.BadParameter("workspace 不能通过符号链接访问")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -75,7 +83,11 @@ def run(
         dispatcher = ToolDispatcher(
             workspace, approve_writes=approve_writes, allow_overwrite=allow_overwrite
         )
-        backend = ScriptedMockModel() if model == "mock" else OpenAICompatibleModel.from_env()
+        backend = (
+            ScriptedMockModel(overwrite=allow_overwrite)
+            if model == "mock"
+            else OpenAICompatibleModel.from_env()
+        )
         budget = Budget(
             max_iterations=max_iterations,
             max_tool_calls=max_tool_calls,
@@ -168,6 +180,22 @@ def mcp_demo(workspace: Path = Path("demo_workspace"), timeout: float = 15) -> N
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if not result["all_match"]:
         raise typer.Exit(1)
+
+
+@app.command()
+def tui(
+    run_id: Annotated[str | None, typer.Argument()] = None,
+    watch: bool = False,
+    db: Path = Path(".agent/runs.sqlite3"),
+) -> None:
+    """View actual plan progress, tool timeline and verified artifact evidence."""
+    from workspace_agent.ui import view
+
+    try:
+        view(RunStore(db), run_id=run_id, watch=watch)
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(1) from None
 
 
 if __name__ == "__main__":

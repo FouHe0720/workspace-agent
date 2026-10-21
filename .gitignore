@@ -22,4 +22,5 @@ htmlcov/
 models/
 downloads/
 demo_workspace/study_plan.md
+workspace_todos.json
 .local/

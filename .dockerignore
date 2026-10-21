@@ -1,0 +1,15 @@
+.git
+.venv
+.env
+.env.*
+.agent
+.local
+__pycache__
+.pytest_cache
+.ruff_cache
+*.db
+*.sqlite*
+*.log
+demo_workspace/study_plan.md
+dist
+build

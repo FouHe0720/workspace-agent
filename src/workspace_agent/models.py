@@ -120,10 +120,11 @@ class ScriptedMockModel:
     comes from read_file results. Both scenarios include a missing-file recovery.
     """
 
-    def __init__(self, scenario: str = "default") -> None:
+    def __init__(self, scenario: str = "default", *, overwrite: bool = False) -> None:
         if scenario not in {"default", "recovery", "rag"}:
             raise ModelError("CONFIGURATION_ERROR", "Unknown Mock scenario")
         self.scenario = scenario
+        self.overwrite = overwrite
 
     @staticmethod
     def _reply(
@@ -207,7 +208,7 @@ class ScriptedMockModel:
                         {
                             "relative_path": "study_plan.md",
                             "content": self._study_plan(read_notes),
-                            "overwrite": False,
+                            "overwrite": self.overwrite,
                         },
                     )
                 ],

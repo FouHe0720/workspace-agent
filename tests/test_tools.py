@@ -315,16 +315,130 @@ def test_todos_preview_persistence_and_completion(workspace: Path) -> None:
     )
 
 
-def test_todos_never_replace_unrecognized_files(workspace: Path) -> None:
+@pytest.mark.parametrize(
+    "original", ["personal file", "{}", '{"items": []}', '{"format":"other","items":[]}']
+)
+def test_todos_never_replace_unrecognized_files(workspace: Path, original: str) -> None:
     target = workspace / TODO_STATE_PATH
-    target.write_text("personal file")
+    target.write_text(original)
     result = ToolDispatcher(workspace, approve_writes=True).dispatch(
         "todo_manager", {"action": "add", "text": "task"}
     )
     assert not result.ok and result.error.code == "TODO_STATE_INVALID"
-    assert target.read_text() == "personal file"
+    assert target.read_text() == original
     direct = ToolDispatcher(workspace, approve_writes=True, allow_overwrite=True).dispatch(
         "write_file",
         {"relative_path": TODO_STATE_PATH, "content": "replacement", "overwrite": True},
     )
     assert not direct.ok and direct.error.code == "SANDBOX_VIOLATION"
+
+
+@pytest.mark.parametrize("operation", ["read_file", "write_file"])
+def test_renamed_parent_is_denied_before_read_or_truncate(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    dispatcher = ToolDispatcher(workspace, approve_writes=True, allow_overwrite=True)
+    original = (workspace / "notes/rag.md").read_text()
+    escaped = tmp_path / "escaped"
+    real_open = os.open
+    moved = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal moved
+        if path == "rag.md" and not moved:
+            moved = True
+            (workspace / "notes").rename(escaped)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", racing_open)
+    args = {"relative_path": "notes/rag.md"}
+    if operation == "write_file":
+        args.update(content="replacement", overwrite=True)
+    result = dispatcher.dispatch(operation, args)
+    assert not result.ok and result.error.code == "SANDBOX_VIOLATION"
+    assert (escaped / "rag.md").read_text() == original
+    assert result.data == {}
+
+
+def test_parent_rename_during_read_does_not_return_content(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = ToolDispatcher(workspace)
+    real_read = os.read
+    moved = False
+
+    def racing_read(descriptor, size):
+        nonlocal moved
+        content = real_read(descriptor, size)
+        if not moved:
+            moved = True
+            (workspace / "notes").rename(tmp_path / "escaped")
+        return content
+
+    monkeypatch.setattr(os, "read", racing_read)
+    result = dispatcher.dispatch("read_file", {"relative_path": "notes/rag.md"})
+    assert not result.ok and result.error.code == "SANDBOX_VIOLATION"
+    assert result.data == {} and result.evidence == []
+
+
+def test_todo_state_race_does_not_replace_new_user_content(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = ToolDispatcher(workspace, approve_writes=True)
+    assert dispatcher.dispatch("todo_manager", {"action": "add", "text": "first"}).ok
+    real_write_text = dispatcher.sandbox.write_text
+
+    def racing_write_text(path, content, **kwargs):
+        (workspace / TODO_STATE_PATH).write_text("new user content")
+        return real_write_text(path, content, **kwargs)
+
+    monkeypatch.setattr(dispatcher.sandbox, "write_text", racing_write_text)
+    result = dispatcher.dispatch("todo_manager", {"action": "add", "text": "second"})
+    assert not result.ok and result.error.code == "STATE_CONFLICT"
+    assert (workspace / TODO_STATE_PATH).read_text() == "new user content"
+
+
+def test_permission_errors_are_structured_without_private_path(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = ToolDispatcher(workspace)
+    real_open = os.open
+
+    def permission_denied(path, flags, *args, **kwargs):
+        if path == "rag.md":
+            raise PermissionError(13, "private OS error /private/account/token")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", permission_denied)
+    result = dispatcher.dispatch("read_file", {"relative_path": "notes/rag.md"})
+    assert not result.ok and result.error.code == "PERMISSION_DENIED"
+    assert "/private" not in result.error.message
+
+
+def test_unexpected_oserror_is_structured(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dispatcher = ToolDispatcher(workspace)
+
+    def fail_read(_path):
+        raise OSError("private operating-system details")
+
+    monkeypatch.setattr(dispatcher.sandbox, "read_text", fail_read)
+    result = dispatcher.dispatch("read_file", {"relative_path": "notes/rag.md"})
+    assert not result.ok and result.error.code == "FILESYSTEM_ERROR"
+    assert "private" not in result.error.message
+
+
+def test_unreadable_scan_directory_is_bounded_and_skipped(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = ToolDispatcher(workspace)
+    real_directory_fd = dispatcher.sandbox._directory_fd
+
+    def unreadable(parts):
+        if parts == ("notes",):
+            raise PermissionError("denied")
+        return real_directory_fd(parts)
+
+    monkeypatch.setattr(dispatcher.sandbox, "_directory_fd", unreadable)
+    result = dispatcher.dispatch("search_files", {"query": "RAG"})
+    assert result.ok and result.data["matches"] == []
+    assert result.data["skipped"] == 1 and result.data["scanned_entries"] == 1

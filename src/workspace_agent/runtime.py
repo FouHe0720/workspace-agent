@@ -112,6 +112,7 @@ class AgentRuntime:
         started = time.monotonic()
         repeats: Counter[str] = Counter()
         model_failures = 0
+        seen_call_ids: set[str] = set()
         try:
             self._save(state)
             for _ in range(state.budget.max_iterations):
@@ -141,18 +142,36 @@ class AgentRuntime:
                             state.budget.model_timeout, state.budget.timeout_seconds - elapsed
                         ),
                     )
-                except (TimeoutError, ModelError) as exc:
+                except (asyncio.TimeoutError, ModelError) as exc:
+                    if not isinstance(self.model, ScriptedMockModel):
+                        state.tokens_used += reservation
+                        state.token_charges.append(
+                            {"amount": reservation, "source": "uncertain_request_byte_estimate"}
+                        )
                     code = getattr(exc, "code", "MODEL_TIMEOUT")
                     state.errors.append({"code": code})
                     if (
-                        isinstance(exc, TimeoutError) or getattr(exc, "retryable", False)
+                        isinstance(exc, asyncio.TimeoutError) or getattr(exc, "retryable", False)
                     ) and model_failures < 1:
                         model_failures += 1
                         self._save(state)
                         continue
                     return self._stop(state, "failed", code)
-                state.tokens_used += reply.usage_tokens or (
+                charge = reply.usage_tokens or (
                     0 if isinstance(self.model, ScriptedMockModel) else reservation
+                )
+                state.tokens_used += charge
+                state.token_charges.append(
+                    {
+                        "amount": charge,
+                        "source": "provider"
+                        if reply.usage_tokens
+                        else (
+                            "offline_mock"
+                            if isinstance(self.model, ScriptedMockModel)
+                            else "request_byte_estimate"
+                        ),
+                    }
                 )
                 if state.tokens_used >= state.budget.max_tokens:
                     return self._stop(state, "budget_exceeded", "TOKEN_BUDGET")
@@ -162,10 +181,16 @@ class AgentRuntime:
                         (e.result or {}).get("data", {}).get("preview") for e in state.tool_history
                     )
                     state.status = "preview" if previewed else "completed"
+                    writes = [e for e in state.tool_history if e.name == "write_file"]
+                    if writes and not (writes[-1].result or {}).get("ok"):
+                        state.status = "failed"
                     state.final_result = reply.content
                     state.plan[-1].status = "completed"
                     state.completed_steps.append(state.plan[-1].description)
                     break
+                if any(c.id in seen_call_ids for c in reply.tool_calls):
+                    return self._stop(state, "failed", "DUPLICATE_CALL_ID")
+                seen_call_ids.update(c.id for c in reply.tool_calls)
                 calls = [
                     {
                         "id": c.id,
@@ -188,7 +213,15 @@ class AgentRuntime:
                         return self._stop(state, "budget_exceeded", "TOOL_CALL_BUDGET")
                     if time.monotonic() - started >= state.budget.timeout_seconds:
                         return self._stop(state, "budget_exceeded", "TIME_BUDGET")
-                    key = call.name + json.dumps(call.arguments, sort_keys=True)
+                    try:
+                        normalized = (
+                            json.loads(call.arguments)
+                            if isinstance(call.arguments, str)
+                            else call.arguments
+                        )
+                    except (ValueError, TypeError):
+                        normalized = call.arguments
+                    key = call.name + json.dumps(normalized, sort_keys=True)
                     repeats[key] += 1
                     if repeats[key] > 2:
                         return self._stop(state, "failed", "LOOP_DETECTED")

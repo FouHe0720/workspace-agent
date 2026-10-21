@@ -80,7 +80,14 @@ class Sandbox:
         except OSError as exc:
             raise _filesystem_error(exc) from exc
         repo_root = Path(__file__).resolve().parents[2]
-        forbidden = {Path("/"), Path.home().resolve(), repo_root, Path("/home"), Path("/tmp")}
+        forbidden = {
+            Path("/"),
+            Path.home().resolve(),
+            repo_root,
+            Path("/home"),
+            Path("/root"),
+            Path("/tmp"),
+        }
         system_roots = (
             "/etc",
             "/proc",
@@ -97,6 +104,7 @@ class Sandbox:
         )
         if (
             resolved in forbidden
+            or resolved.parent == Path("/home")
             or any(resolved == Path(p) or Path(p) in resolved.parents for p in system_roots)
             or any(_private_name(part) for part in resolved.parts[1:])
             or (resolved / ".git").exists()
@@ -178,10 +186,43 @@ class Sandbox:
                 )
                 os.close(descriptor)
                 descriptor = next_fd
+            self._verify_directory_location(descriptor, parts)
             return descriptor
-        except OSError as exc:
+        except (OSError, SandboxError) as exc:
             os.close(descriptor)
+            if isinstance(exc, SandboxError):
+                raise
             raise _filesystem_error(exc) from exc
+
+    def _verify_directory_location(self, descriptor: int, parts: tuple[str, ...]) -> None:
+        """Detect renamed ancestors while preserving no-follow lookup semantics.
+
+        Checks surround each operation. A hostile process with the same OS identity
+        can still rename between a check and a syscall; that threat needs OS isolation.
+        """
+        self._check_root()
+        comparison_fd = os.dup(self._root_fd)
+        try:
+            for part in parts:
+                child_fd = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=comparison_fd,
+                )
+                os.close(comparison_fd)
+                comparison_fd = child_fd
+            if self._identity(os.fstat(comparison_fd)) != self._identity(os.fstat(descriptor)):
+                raise SandboxError(
+                    "SANDBOX_VIOLATION", "A workspace directory changed during access."
+                )
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise SandboxError(
+                    "SANDBOX_VIOLATION", "A workspace directory moved during access."
+                ) from exc
+            raise _filesystem_error(exc) from exc
+        finally:
+            os.close(comparison_fd)
 
     @staticmethod
     def _check_regular(info: os.stat_result) -> None:
@@ -214,8 +255,10 @@ class Sandbox:
             try:
                 info = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
             except FileNotFoundError:
+                self._verify_directory_location(parent_fd, parts[:-1])
                 return False
             self._check_regular(info)
+            self._verify_directory_location(parent_fd, parts[:-1])
             return True
         except OSError as exc:
             raise _filesystem_error(exc) from exc
@@ -232,8 +275,11 @@ class Sandbox:
                 os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
                 dir_fd=parent_fd,
             )
+            self._verify_directory_location(parent_fd, parts[:-1])
             self._check_regular(os.fstat(descriptor))
-            return self._read_descriptor(descriptor)
+            content = self._read_descriptor(descriptor)
+            self._verify_directory_location(parent_fd, parts[:-1])
+            return content
         except OSError as exc:
             raise _filesystem_error(exc) from exc
         finally:
@@ -251,7 +297,14 @@ class Sandbox:
             raise SandboxError("UNSUPPORTED_FILE", "Binary and control-character files are denied.")
         return text
 
-    def write_text(self, relative_path: str, content: str, *, overwrite: bool = False) -> dict:
+    def write_text(
+        self,
+        relative_path: str,
+        content: str,
+        *,
+        overwrite: bool = False,
+        expected_sha256: str | None = None,
+    ) -> dict:
         raw = content.encode("utf-8")
         if len(raw) > MAX_FILE_BYTES:
             raise SandboxError("RESOURCE_LIMIT", "The content exceeds the workspace byte limit.")
@@ -277,7 +330,17 @@ class Sandbox:
                 descriptor = os.open(
                     parts[-1], flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent_fd
                 )
+            self._verify_directory_location(parent_fd, parts[:-1])
             self._check_regular(os.fstat(descriptor))
+            if expected_sha256 is not None:
+                previous = self._read_descriptor(descriptor)
+                if hashlib.sha256(previous).hexdigest() != expected_sha256:
+                    raise SandboxError(
+                        "STATE_CONFLICT",
+                        "The tool-owned state changed before it could be updated.",
+                        True,
+                    )
+                os.lseek(descriptor, 0, os.SEEK_SET)
             os.ftruncate(descriptor, 0)
             pending = memoryview(raw)
             while pending:
@@ -288,7 +351,7 @@ class Sandbox:
                     )
                 pending = pending[written:]
             os.fsync(descriptor)
-            self._check_root()
+            self._verify_directory_location(parent_fd, parts[:-1])
             verification_fd = os.open(
                 parts[-1],
                 os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
@@ -303,6 +366,7 @@ class Sandbox:
                 raise SandboxError(
                     "VERIFICATION_FAILED", "The written file did not pass content verification."
                 )
+            self._verify_directory_location(parent_fd, parts[:-1])
             return {
                 "path": "/".join(parts),
                 "exists": True,
@@ -349,6 +413,7 @@ class Sandbox:
                         )
                     except OSError:
                         skipped += 1
+            self._verify_directory_location(descriptor, parts)
         except OSError as exc:
             raise _filesystem_error(exc) from exc
         finally:
@@ -363,6 +428,7 @@ class Sandbox:
 
     def scan_files(self) -> dict:
         """Count every observed entry, including denied and unreadable entries."""
+        self._check_root()
         pending: list[tuple[str, ...]] = [()]
         files: list[str] = []
         scanned = skipped = 0
@@ -396,7 +462,7 @@ class Sandbox:
                         if scanned >= MAX_SCAN_ENTRIES or len(files) >= MAX_SCAN_FILES:
                             truncated = True
                             break
-            except SandboxError:
+            except (SandboxError, OSError):
                 skipped += 1
             finally:
                 if descriptor >= 0:

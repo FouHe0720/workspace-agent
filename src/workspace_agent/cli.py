@@ -155,5 +155,20 @@ def recover(run_id: str, db: Path = Path(".agent/runs.sqlite3")) -> None:
         raise typer.BadParameter("Run 不存在") from None
 
 
+@app.command("mcp-demo")
+def mcp_demo(workspace: Path = Path("demo_workspace"), timeout: float = 15) -> None:
+    """Start the official MCP stdio subprocess and compare native/MCP results."""
+    from workspace_agent.mcp_client import MCPClientError, run_mcp_demo
+
+    try:
+        result = asyncio.run(run_mcp_demo(workspace, timeout=timeout))
+    except (MCPClientError, SandboxError) as exc:
+        console.print(getattr(exc, "code", "MCP_ERROR"))
+        raise typer.Exit(1) from None
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if not result["all_match"]:
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()

@@ -36,8 +36,8 @@ class ToolEvent(BaseModel):
 
 class TaskState(BaseModel):
     run_id: str = Field(default_factory=lambda: uuid4().hex)
-    goal: str
-    workspace: str
+    goal: str = Field(min_length=1, max_length=4000)
+    workspace: str = Field(min_length=1, max_length=4096)
     status: Literal[
         "running", "completed", "preview", "failed", "budget_exceeded", "interrupted"
     ] = "running"
@@ -51,6 +51,7 @@ class TaskState(BaseModel):
     budget: Budget = Field(default_factory=Budget)
     iterations: int = 0
     tokens_used: int = 0
+    token_charges: list[dict[str, Any]] = Field(default_factory=list)
     elapsed_seconds: float = 0
     started_at: str = Field(default_factory=utc_now)
     updated_at: str = Field(default_factory=utc_now)

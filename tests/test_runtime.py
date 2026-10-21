@@ -68,6 +68,27 @@ class SlowDispatcher:
         return result if result is not None else self.delegate.dispatch(name, arguments)
 
 
+class CheckpointDispatcher:
+    """Verify the durable intent from the separate process that performs the write."""
+
+    def __init__(self, delegate: ToolDispatcher, store: RunStore) -> None:
+        self.delegate = delegate
+        self.store = store
+
+    def schemas(self) -> list[dict]:
+        return self.delegate.schemas()
+
+    def dispatch(self, name: str, arguments: dict) -> Any:
+        [saved] = self.store.list_runs()
+        pending = saved.tool_history[-1]
+        assert saved.status == "running"
+        assert pending.name == name and pending.arguments == arguments
+        assert pending.result is None and pending.finished_at is None
+        result = self.delegate.dispatch(name, arguments)
+        result.data["intent_was_durable"] = True
+        return result
+
+
 def tool_reply(name: str, arguments: dict | str, call_id: str = "call-1") -> ModelReply:
     return ModelReply(tool_calls=[ToolCall(id=call_id, name=name, arguments=arguments)])
 
@@ -252,6 +273,89 @@ async def test_unavailable_tool_returns_error_without_executing_shell(
     assert not (workspace / "should_not_exist").exists()
 
 
+async def test_approved_todo_mutation_survives_between_runtime_tool_calls(
+    workspace: Path, store: RunStore
+) -> None:
+    model = SequenceModel(
+        tool_reply("todo_manager", {"action": "add", "text": "比较 RAG 索引与评估"}, "add"),
+        tool_reply("todo_manager", {"action": "list"}, "list"),
+        ModelReply(content="已记录待办事项。"),
+    )
+    state = await AgentRuntime(model, ToolDispatcher(workspace, approve_writes=True), store).run(
+        "add then inspect a todo", str(workspace)
+    )
+
+    assert state.status == "completed"
+    added = state.tool_history[0].result["data"]["items"]
+    listed = state.tool_history[1].result["data"]["items"]
+    assert len(added) == 1
+    assert listed == added
+
+
+async def test_reused_call_id_rejects_entire_new_batch_before_any_write(
+    workspace: Path, store: RunStore
+) -> None:
+    model = SequenceModel(
+        tool_reply("calculator", {"expression": "2+2"}, "reused"),
+        ModelReply(
+            tool_calls=[
+                ToolCall(
+                    id="unique",
+                    name="write_file",
+                    arguments={
+                        "relative_path": "first_blocked.md",
+                        "content": "must not execute",
+                    },
+                ),
+                ToolCall(
+                    id="reused",
+                    name="write_file",
+                    arguments={
+                        "relative_path": "second_blocked.md",
+                        "content": "must not execute",
+                    },
+                ),
+            ]
+        ),
+    )
+    state = await AgentRuntime(model, ToolDispatcher(workspace, approve_writes=True), store).run(
+        "reject ambiguous tool correlation", str(workspace)
+    )
+
+    assert state.status == "failed"
+    assert error_codes(state)[-1] == "DUPLICATE_CALL_ID"
+    assert len(state.tool_history) == 1
+    assert not (workspace / "first_blocked.md").exists()
+    assert not (workspace / "second_blocked.md").exists()
+
+
+async def test_unsuccessful_write_cannot_finish_with_completed_status(
+    workspace: Path, store: RunStore
+) -> None:
+    model = SequenceModel(
+        tool_reply(
+            "write_file",
+            {
+                "relative_path": "missing_parent/result.md",
+                "content": "not written",
+            },
+        ),
+        ModelReply(
+            content="The model may claim success, but this is not verified artifact evidence"
+        ),
+    )
+    state = await AgentRuntime(model, ToolDispatcher(workspace, approve_writes=True), store).run(
+        "generate an artifact", str(workspace)
+    )
+
+    assert state.status == "failed"
+    assert "FILE_NOT_FOUND" in error_codes(state)
+    assert not (workspace / "missing_parent" / "result.md").exists()
+    assert not any(
+        (event.result or {}).get("data", {}).get("written") for event in state.tool_history
+    )
+
+
 @pytest.mark.parametrize("relative_path", ["../private_secret.txt", "/etc/passwd", "%2e%2e/x"])
 async def test_path_escape_stops_runtime_before_another_model_turn(
     workspace: Path, store: RunStore, relative_path: str
@@ -345,6 +449,97 @@ async def test_reported_token_budget_prevents_proposed_write(
     assert not (workspace / "over_budget.md").exists()
 
 
+async def test_provider_usage_accumulates_across_turns_before_a_proposed_write(
+    workspace: Path, store: RunStore
+) -> None:
+    first = tool_reply("calculator", {"expression": "2+2"}, "first")
+    first.usage_tokens = 12000
+    second = tool_reply("write_file", {"relative_path": "unaffordable.md", "content": "no"})
+    second.usage_tokens = 9000
+    model = SequenceModel(first, second)
+    state = await AgentRuntime(
+        model, ToolDispatcher(workspace, approve_writes=True), store, Budget(max_tokens=20000)
+    ).run("accumulate provider usage", str(workspace))
+
+    assert state.status == "budget_exceeded"
+    assert state.tokens_used == 21000
+    assert [event.name for event in state.tool_history] == ["calculator"]
+    assert len(model.requests) == 2
+    assert not (workspace / "unaffordable.md").exists()
+    assert all(charge["source"] == "provider" for charge in state.token_charges)
+
+
+async def test_missing_usage_is_charged_and_cannot_fund_unlimited_requests(
+    workspace: Path, store: RunStore, tmp_path: Path
+) -> None:
+    goal = "account for omitted usage"
+    baseline = await AgentRuntime(
+        SequenceModel(ModelReply(content="baseline")),
+        ToolDispatcher(workspace),
+        RunStore(tmp_path / "baseline.sqlite3"),
+        Budget(max_tokens=1000000),
+    ).run(goal, str(workspace))
+    assert baseline.tokens_used > 0
+    model = SequenceModel(
+        tool_reply("calculator", {"expression": "2+2"}),
+        ModelReply(content="another model request requires its own budget"),
+    )
+    state = await AgentRuntime(
+        model,
+        ToolDispatcher(workspace),
+        store,
+        Budget(max_tokens=baseline.tokens_used * 2 - 1),
+    ).run(goal, str(workspace))
+
+    assert state.status == "budget_exceeded"
+    assert error_codes(state)[-1] == "TOKEN_BUDGET"
+    assert len(model.requests) == 1
+    assert state.tokens_used > 0
+    assert state.token_charges[0]["source"] == "request_byte_estimate"
+
+
+async def test_timeout_charge_can_block_a_retry_that_might_be_billed_again(
+    workspace: Path, store: RunStore, tmp_path: Path
+) -> None:
+    goal = "reserve budget for uncertain requests"
+    baseline = await AgentRuntime(
+        SequenceModel(ModelError("MODEL_TIMEOUT", "uncertain request")),
+        ToolDispatcher(workspace),
+        RunStore(tmp_path / "baseline.sqlite3"),
+        Budget(max_tokens=1000000),
+    ).run(goal, str(workspace))
+    assert baseline.tokens_used > 0
+    model = SequenceModel(
+        ModelError("MODEL_TIMEOUT", "request may have been billed", retryable=True),
+        ModelReply(content="retry must not be sent"),
+    )
+    state = await AgentRuntime(
+        model,
+        ToolDispatcher(workspace),
+        store,
+        Budget(max_tokens=baseline.tokens_used * 2 - 1),
+    ).run(goal, str(workspace))
+
+    assert state.status == "budget_exceeded"
+    assert error_codes(state)[-1] == "TOKEN_BUDGET"
+    assert len(model.requests) == 1
+    assert state.token_charges[0]["source"] == "uncertain_request_byte_estimate"
+
+
+async def test_requested_completion_reservation_is_checked_before_network_work(
+    workspace: Path, store: RunStore
+) -> None:
+    model = SequenceModel(ModelReply(content="must not be requested"))
+    model.max_tokens = 20000
+    state = await AgentRuntime(
+        model, ToolDispatcher(workspace), store, Budget(max_tokens=20000)
+    ).run("reserve completion as well as request input", str(workspace))
+
+    assert state.status == "budget_exceeded"
+    assert error_codes(state)[-1] == "TOKEN_BUDGET"
+    assert model.requests == []
+
+
 async def test_wall_clock_budget_bounds_even_a_stalled_model(
     workspace: Path, store: RunStore
 ) -> None:
@@ -377,6 +572,25 @@ async def test_repeated_identical_tool_call_is_stopped_after_two_executions(
     assert error_codes(state)[-1] == "LOOP_DETECTED"
     assert len(state.tool_history) == 2
     assert state.iterations == 3
+
+
+async def test_loop_detection_normalizes_equivalent_json_argument_representations(
+    workspace: Path, store: RunStore
+) -> None:
+    model = SequenceModel(
+        tool_reply("calculator", {"expression": "2+2"}, "dict"),
+        tool_reply("calculator", '{"expression":"2+2"}', "json"),
+        tool_reply("calculator", '{ "expression" : "2+2" }', "json-spaced"),
+        ModelReply(content="equivalent calls should already have been stopped"),
+    )
+    state = await AgentRuntime(
+        model, ToolDispatcher(workspace), store, Budget(max_tokens=100000)
+    ).run("detect semantic repetition", str(workspace))
+
+    assert state.status == "failed"
+    assert error_codes(state)[-1] == "LOOP_DETECTED"
+    assert len(state.tool_history) == 2
+    assert len(model.requests) == 3
 
 
 @pytest.mark.parametrize("succeed_on_retry", [False, True])
@@ -457,6 +671,24 @@ async def test_write_timeout_preserves_possible_side_effect_and_stops_without_re
     assert (workspace / "uncertain.md").read_text(encoding="utf-8") == "one write"
     assert state.tool_history[0].result["ok"] is False
     assert store.load(state.run_id).status == "failed"
+
+
+async def test_write_intent_is_durable_before_forked_tool_can_modify_files(
+    workspace: Path, store: RunStore
+) -> None:
+    model = SequenceModel(
+        tool_reply("write_file", {"relative_path": "checkpointed.md", "content": "record intent"}),
+        ModelReply(content="verified write"),
+    )
+    dispatcher = CheckpointDispatcher(ToolDispatcher(workspace, approve_writes=True), store)
+    state = await AgentRuntime(model, dispatcher, store).run(
+        "checkpoint before side effect", str(workspace)
+    )
+
+    assert state.status == "completed"
+    assert state.tool_history[0].result["ok"] is True
+    assert state.tool_history[0].result["data"]["intent_was_durable"] is True
+    assert (workspace / "checkpointed.md").read_text(encoding="utf-8") == "record intent"
 
 
 async def test_cancellation_persists_inflight_intent_and_does_not_replay_write(

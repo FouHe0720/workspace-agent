@@ -73,7 +73,7 @@ class TodoItem(StrictArguments):
 
 
 class TodoState(StrictArguments):
-    format: Literal["workspace-agent-todos-v1"] = "workspace-agent-todos-v1"
+    format: Literal["workspace-agent-todos-v1"]
     items: list[TodoItem] = Field(default_factory=list, max_length=100)
 
 
@@ -188,6 +188,8 @@ class ToolDispatcher:
             return getattr(self, f"_{name}")(args)
         except SandboxError as exc:
             return _error(exc.code, exc.message, exc.retryable)
+        except OSError:
+            return _error("FILESYSTEM_ERROR", "The workspace operation failed.", True)
         except (ArithmeticError, ValueError, SyntaxError):
             if name == "calculator":
                 return _error(
@@ -386,9 +388,15 @@ class ToolDispatcher:
         if self.approve_writes:
             # A todo mutation authorizes replacing this validated, reserved tool state.
             # Arbitrary user files and write_file still require allow_overwrite.
-            payload = TodoState(items=[TodoItem.model_validate(item) for item in updated])
+            payload = TodoState(
+                format="workspace-agent-todos-v1",
+                items=[TodoItem.model_validate(item) for item in updated],
+            )
             evidence = self.sandbox.write_text(
-                TODO_STATE_PATH, payload.model_dump_json(indent=2) + "\n", overwrite=exists
+                TODO_STATE_PATH,
+                payload.model_dump_json(indent=2) + "\n",
+                overwrite=exists,
+                expected_sha256=state_hash,
             )
             result = self._todo_result(updated, persisted=True, state_hash=evidence["sha256"])
             result.evidence = [{"kind": "todo_state_write", **evidence}]

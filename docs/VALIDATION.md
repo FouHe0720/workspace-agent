@@ -25,7 +25,7 @@
 | V0 | 实际 Mock 创建学习计划；126 项 pytest 通过；Ruff 通过；提交 edb81ec |
 | V1 | 状态/预算/恢复与沙盒复审；真实 MCP stdio；158 项 pytest 通过；Ruff 通过；提交 ade2fe6 |
 | V2 | TUI、CLI、安装/演示、锁定依赖与隐私脚本；202 项 pytest 通过；Ruff 通过；Docker 无网络运行通过；提交 1a66853 |
-| V3 | 展示文档、可复制 Quick Start、历史与暂存区隐私审查、GitHub 发布；发布和 CI 状态见下表 |
+| V3 | 展示文档、可复制 Quick Start、历史与暂存区隐私审查完成；PUBLIC 仓库已真实创建并推送，托管 CI 三个 jobs 全通过 |
 
 ## 本地命令及结果
 
@@ -39,12 +39,14 @@
 | 安装包检查 | 从临时源码副本离线构建 wheel；模块、三份笔记与入口存在；提取后的隔离 CLI 全流程通过 |
 | 隐私脚本 | tracked、完整 index、未忽略待发布文件、可达历史均已扫描通过；最终暂存清单另行核对 |
 | Docker 最终构建与运行 | 通过；带哈希生产依赖与最新源码构建成功，非 root / 无网络 / 移除 capabilities / no-new-privileges 下 Mock 实际写入成功，容器内 MCP 六组对比全匹配 |
-| GitHub 公共发布 | 尚未执行；本地验收后使用账户 FouHe0720 普通创建/推送 |
-| 托管 CI | 尚未执行；已配置 Python 3.10 / 3.12 与 Docker jobs |
+| GitHub 公共发布 | 已执行；账户 FouHe0720，origin 与独立仓库匹配，main 正常推送，API 复核 visibility=PUBLIC |
+| 托管 CI | 真实通过；首轮提交 28aea6b 的 quality (3.10)、quality (3.12)、docker 三个 jobs 均 completed/success |
 
 测试耗时受环境影响，不作为性能评测。未报告吞吐、准确率、成本降低或覆盖率指标。
 
 本地镜像 `workspace-agent:local` 验证时 ID：`sha256:2dd2d2e9c5ced9ec1590d885d479c7ae2362618fc47419a565ef78abc1521a3b`；配置用户 `10001:10001`。镜像构建访问公开依赖索引，运行时通过 `--network none` 验证离线闭环。没有向镜像传递模型密钥。
+
+公开仓库：[FouHe0720/workspace-agent](https://github.com/FouHe0720/workspace-agent)。首轮真实托管验证：[CI run 39605280878](https://github.com/FouHe0720/workspace-agent/actions/runs/39605280878)，三 job 均成功；两 Python job 分别执行 frozen 安装、make check、完整 demo 和隐私审查，Docker job 实际构建并无网络运行。此段为该次运行的记录；后续提交状态可在仓库 Actions 中核对。
 
 ## 实际产物证据
 

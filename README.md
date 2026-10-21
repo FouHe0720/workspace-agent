@@ -99,7 +99,7 @@ make docker
 .venv/bin/python scripts/privacy_check.py --history --include-untracked
 ```
 
-本地实际执行：**202 项 pytest 通过，Ruff check 与 format 检查通过**；Docker 无网络 Mock 写入及容器内 MCP 六组对比均通过。环境与托管 CI 执行状态见 [VALIDATION.md](docs/VALIDATION.md)。测试在独立临时目录覆盖沙盒、覆盖保护、注入、参数修复、预算、循环、超时、中断、持久化与真实 MCP 子进程。CI 配置包含 Python 3.10 / 3.12 和 Docker job。
+本地实际执行：**202 项 pytest 通过，Ruff check 与 format 检查通过**；Docker 无网络 Mock 写入及容器内 MCP 六组对比均通过。GitHub 托管 CI 的 Python 3.10、3.12 与 Docker 三个 jobs 也已真实通过，详见 [VALIDATION.md](docs/VALIDATION.md)。测试在独立临时目录覆盖沙盒、覆盖保护、注入、参数修复、预算、循环、超时、中断、持久化与真实 MCP 子进程。
 
 `uv.lock` 锁定开发环境；`requirements.lock` 是带哈希的生产依赖导出，Docker 使用该文件安装。无 `uv` 时 `scripts/install.sh` 使用系统 Python venv + pip，依赖按 pyproject 范围解析；系统需已具备 venv 支持。未进行系统级安装。
 

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "workspace-task-agent"
+version = "0.1.0"
+description = "An auditable, sandboxed workspace agent with a handwritten loop and MCP"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = ["pydantic>=2.11,<3", "httpx>=0.28,<1", "mcp>=2.3,<3", "typer>=0.16,<1", "rich>=14,<15"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<10", "pytest-asyncio>=1.0,<2", "ruff>=0.12,<1"]
+
+[project.scripts]
+agent = "workspace_agent.cli:app"
+workspace-mcp = "workspace_agent.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/workspace_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]

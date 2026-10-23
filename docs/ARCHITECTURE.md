@@ -2,7 +2,7 @@
 
 Workspace Task Agent 把模型产生的工具请求转成受限、可记录、可核验的文件操作。核心循环由项目自行实现，模型适配器只返回消息与 `tool_calls`，文件权限由独立的 Python 工具层决定。
 
-默认 `ScriptedMockModel` 是可重复的 RAG 笔记演示脚本。真实自然语言任务通过配置的 OpenAI-compatible API 交给模型；离线脚本不解释任意用户目标，也不模拟通用智能规划。
+默认 `ScriptedMockModel` 是可重复的 RAG 笔记演示脚本；`--scenario campus` 选择 `CampusDeskMockModel` 整理校园通知。真实自然语言任务通过配置的 OpenAI-compatible API 交给模型；离线脚本不解释任意用户目标，也不模拟通用智能规划。
 
 ## 模块与数据流
 
@@ -134,3 +134,19 @@ Client 用固定的当前 Python 解释器和 `-I -m workspace_agent.mcp_server`
 ## 当前取舍
 
 项目使用同步、有界文件工具、顺序调用和 SQLite 快照，便于审查权限与副作用。没有实现通用规划器、自动续跑、并发写事务、远程 MCP 托管或 LangGraph / OpenAI Agents SDK 适配器。未来若加入图式编排，可以改善复杂分支与检查点管理；沙盒、幂等性和证据校验仍需保留，不能交给框架名称替代。
+
+## 校园资料场景
+
+`campus.py` 的 `CampusDeskMockModel` 复用离线模型协议与 `_observations`，每个路径和正文
+均来自真实搜索与读取结果。场景只接受 `materials/` 下的 Markdown，数量超过 8 份时停止，
+缺文件或哈希不匹配时不提议写入。输出使用动态长度代码围栏引用原文，文件内容不会改变工具权限。
+
+`init-demo --scenario campus` 将打包的两份来源摘录与 manifest 复制到专用工作区，已有文件不覆盖。
+写入依旧经统一 ToolDispatcher、Linux 工具进程和 SQLite 意图检查点。场景的固定关键词不代表
+通用模型能力；来源范围见 [校园资料说明](CAMPUS_DATA.md)。
+
+## 终端记录布局
+
+运行目标与状态位于顶部，预算用两列排布，计划与调用时间线分别列出。
+列表和搜索显示数量及路径，读取显示长度、指纹前缀与短摘录；写参数显示字符数，避免重复输出整份文档。
+完整正文仍可通过 inspect 查看，核验产物保留完整 SHA-256。界面只格式化已有状态，不改变执行或证据条件。

@@ -10,6 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from workspace_agent.campus import CampusDeskMockModel
 from workspace_agent.domain import Budget
 from workspace_agent.models import ModelError, OpenAICompatibleModel, ScriptedMockModel
 from workspace_agent.runtime import AgentRuntime
@@ -22,29 +23,33 @@ console = Console(markup=False)
 
 
 @app.command("init-demo")
-def init_demo(workspace: Path = Path("demo_workspace")) -> None:
-    """Create an explicitly authorized demo directory with original public notes."""
+def init_demo(workspace: Path = Path("demo_workspace"), scenario: str = "notes") -> None:
+    """Create a dedicated demo directory with notes or historical campus excerpts."""
     try:
-        _init_demo(workspace)
+        _init_demo(workspace, scenario)
     except (SandboxError, OSError) as exc:
         console.print(f"初始化失败：{getattr(exc, 'code', type(exc).__name__)}")
         raise typer.Exit(2) from None
 
 
-def _init_demo(workspace: Path) -> None:
+def _init_demo(workspace: Path, scenario: str = "notes") -> None:
+    if scenario not in {"notes", "campus"}:
+        raise typer.BadParameter("--scenario 仅支持 notes 或 campus")
+    folder = "materials" if scenario == "campus" else "notes"
+    fixture = "campus" if scenario == "campus" else "notes"
     if workspace.is_symlink() or any(p.is_symlink() for p in workspace.absolute().parents):
         raise typer.BadParameter("workspace 不能通过符号链接访问")
     workspace.mkdir(parents=True, exist_ok=True)
     dispatcher = ToolDispatcher(workspace, approve_writes=True)
-    if (workspace / "notes").is_symlink():
-        raise typer.BadParameter("notes 不能是符号链接")
-    (workspace / "notes").mkdir(exist_ok=True)
-    for item in files("workspace_agent").joinpath("fixtures/notes").iterdir():
-        if item.name.endswith(".md"):
+    if (workspace / folder).is_symlink():
+        raise typer.BadParameter(f"{folder} 不能是符号链接")
+    (workspace / folder).mkdir(exist_ok=True)
+    for item in files("workspace_agent").joinpath(f"fixtures/{fixture}").iterdir():
+        if item.name.endswith((".md", ".json")):
             result = dispatcher.dispatch(
                 "write_file",
                 {
-                    "relative_path": f"notes/{item.name}",
+                    "relative_path": f"{folder}/{item.name}",
                     "content": item.read_text(encoding="utf-8"),
                 },
             )
@@ -62,6 +67,7 @@ def run(
     goal: Annotated[str, typer.Argument(min=1, max=4000)],
     workspace: Path = Path("demo_workspace"),
     model: str = "mock",
+    scenario: str = "notes",
     dry_run: bool = False,
     approve_writes: bool = False,
     allow_overwrite: bool = False,
@@ -79,15 +85,18 @@ def run(
         raise typer.BadParameter("--allow-overwrite 需要 --approve-writes")
     if model not in {"mock", "api"}:
         raise typer.BadParameter("--model 仅支持 mock 或 api")
+    if scenario not in {"notes", "campus"}:
+        raise typer.BadParameter("--scenario 仅支持 notes 或 campus")
     try:
         dispatcher = ToolDispatcher(
             workspace, approve_writes=approve_writes, allow_overwrite=allow_overwrite
         )
-        backend = (
-            ScriptedMockModel(overwrite=allow_overwrite)
-            if model == "mock"
-            else OpenAICompatibleModel.from_env()
-        )
+        if model == "api":
+            backend = OpenAICompatibleModel.from_env()
+        elif scenario == "campus":
+            backend = CampusDeskMockModel(overwrite=allow_overwrite)
+        else:
+            backend = ScriptedMockModel(overwrite=allow_overwrite)
         budget = Budget(
             max_iterations=max_iterations,
             max_tool_calls=max_tool_calls,

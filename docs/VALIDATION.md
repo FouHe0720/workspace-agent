@@ -1,3 +1,16 @@
+# 2026-10-23 校园场景验证
+
+| 命令 | 结果 |
+|---|---|
+| `make check` | Ruff check / format 通过；209 passed |
+| `make campus-demo` | preview 不写文件；completed 写入索引；独立 SHA-256 核验通过 |
+| `python scripts/privacy_check.py --history --include-untracked` | 通过 |
+| `uv build` + 安装目录 smoke | sdist / wheel 构建通过，离开仓库后可从包内初始化两份校园材料 |
+
+新增测试通过实际工具与 SQLite 验证两份校园材料的完整限制、读取/写入哈希、预览无副作用、
+覆盖保护、工作区材料变化、空目录行为与打包来源一致性。真实外部模型未调用，Docker 与托管 CI 未重跑。
+下面是首版工程的历史验证记录，日期和测试数量对应当时版本。
+
 # 实际验证记录
 
 日期：2026-10-21（Asia/Shanghai）。这里仅记录实际命令输出；Mock、HTTP Fixture、MCP 进程与真实远程模型分别标注。
@@ -25,7 +38,7 @@
 | V0 | 实际 Mock 创建学习计划；126 项 pytest 通过；Ruff 通过；提交 edb81ec |
 | V1 | 状态/预算/恢复与沙盒复审；真实 MCP stdio；158 项 pytest 通过；Ruff 通过；提交 ade2fe6 |
 | V2 | TUI、CLI、安装/演示、锁定依赖与隐私脚本；202 项 pytest 通过；Ruff 通过；Docker 无网络运行通过；提交 1a66853 |
-| V3 | 展示文档、可复制 Quick Start、历史与暂存区隐私审查完成；PUBLIC 仓库已真实创建并推送，托管 CI 三个 jobs 全通过 |
+| V3 | 使用文档、可复制 Quick Start、历史与暂存区隐私审查完成；PUBLIC 仓库已真实创建并推送，托管 CI 三个 jobs 全通过 |
 
 ## 本地命令及结果
 

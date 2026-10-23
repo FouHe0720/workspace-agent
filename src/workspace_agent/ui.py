@@ -7,6 +7,7 @@ import re
 import time
 from typing import Any
 
+from rich import box
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
@@ -65,18 +66,95 @@ def _verified_artifacts(state: TaskState) -> list[tuple[str, str]]:
     return list(artifacts.items())
 
 
+def _status(value: str) -> Text:
+    color = {
+        "completed": "green",
+        "preview": "yellow",
+        "running": "cyan",
+        "failed": "red",
+        "budget_exceeded": "yellow",
+        "interrupted": "yellow",
+        "pending": "dim",
+    }.get(value, "")
+    text = _plain(value)
+    if color:
+        text.stylize(color)
+    return text
+
+
+def _arguments(value: Any) -> Text:
+    if isinstance(value, dict) and isinstance(value.get("content"), str):
+        value = {**value, "content": f"{len(value['content'])} 字符，正文见工具观察或 inspect"}
+    return _snippet(value)
+
+
+def _observation(name: str, data: dict) -> RenderableType:
+    if name == "list_files" and isinstance(data.get("entries"), list):
+        entries = data["entries"]
+        lines = [_plain(f"{len(entries)} 个目录条目")]
+        lines.extend(
+            _plain("· " + str(item.get("name", "")))
+            for item in entries[:4]
+            if isinstance(item, dict)
+        )
+        return Group(*lines)
+    if name == "search_files" and isinstance(data.get("matches"), list):
+        matches = data["matches"]
+        paths = list(
+            dict.fromkeys(str(item.get("path", "")) for item in matches if isinstance(item, dict))
+        )
+        label = f"命中 {len(matches)} 处 · {len(paths)} 份资料"
+        if data.get("truncated") or data.get("skipped"):
+            label += " · 结果不完整"
+        return Group(_plain(label), *[_plain(path) for path in paths[:4]])
+    if name == "read_file" and isinstance(data.get("content"), str):
+        content = data["content"]
+        digest = str(data.get("sha256", ""))
+        label = f"读取 {len(content)} 字符"
+        if digest:
+            label += f" · SHA-256 {digest[:12]}…"
+        return Group(_plain(label), _plain(" ".join(content.split()), 160))
+    if name == "write_file":
+        path = str(data.get("path", ""))
+        if data.get("preview"):
+            return Group(_plain(path), _plain(data.get("content", ""), 220))
+        return Group(
+            _plain(path),
+            _plain(f"written={data.get('written')} · {data.get('bytes', '未知')} bytes"),
+        )
+    return _snippet(data, 360)
+
+
+def _panel(content: RenderableType, **kwargs: Any) -> Panel:
+    return Panel(content, **({"title_align": "left", "border_style": "dim"} | kwargs))
+
+
 def render_state(state: TaskState) -> RenderableType:
     """Build a snapshot from real state fields; no tools or filesystem writes occur."""
     heading = Text()
-    heading.append_text(_plain(f"Run: {state.run_id}\nStatus: {state.status}\n"))
-    heading.append_text(_plain(f"目标: {state.goal}\nWorkspace: {state.workspace}", 5000))
-    sections: list[RenderableType] = [Panel(heading, title="Workspace Task Agent · 只读视图")]
+    heading.append_text(_plain(state.goal, 4000))
+    heading.append("\n")
+    heading.append("状态 ", style="dim")
+    heading.append_text(_status(state.status))
+    heading.append_text(_plain(f"\nWorkspace: {state.workspace}", 5000))
+    sections: list[RenderableType] = [
+        _panel(
+            heading,
+            title="工作区任务 · 只读记录",
+            title_align="left",
+            border_style="cyan",
+            subtitle=_plain(f"Run: {state.run_id}"),
+            subtitle_align="left",
+        )
+    ]
 
-    budget = Table.grid(padding=(0, 3))
+    budget = Table.grid(expand=True, padding=(0, 2))
     budget.add_row(
         _plain(f"迭代 {state.iterations}/{state.budget.max_iterations}"),
-        _plain(f"工具 {len(state.tool_history)}/{state.budget.max_tool_calls}"),
-        _plain(f"Token 预算计数 {state.tokens_used}/{state.budget.max_tokens}"),
+        _plain(f"工具调用 {len(state.tool_history)}/{state.budget.max_tool_calls}"),
+    )
+    budget.add_row(
+        _plain(f"Token 计数 {state.tokens_used}/{state.budget.max_tokens}"),
         _plain(f"已记录耗时 {state.elapsed_seconds:.2f}/{state.budget.timeout_seconds:g}s"),
     )
     if state.token_charges:
@@ -84,58 +162,68 @@ def render_state(state: TaskState) -> RenderableType:
             dict.fromkeys(str(item.get("source", "")) for item in state.token_charges)
         )
         budget.add_row(_plain("计数来源: " + sources, 300))
-    sections.append(Panel(budget, title="预算与记录"))
+    sections.append(_panel(budget, title="预算与记录"))
 
-    plan = Table("步骤", "状态", "已保存的计划", expand=True)
+    plan = Table("步骤", "状态", "已保存的计划", expand=True, box=box.SIMPLE, header_style="dim")
     for index, step in enumerate(state.plan, 1):
-        plan.add_row(_plain(index), _plain(step.status), _plain(step.description, 1000))
-    sections.append(Panel(plan if state.plan else Text("尚无已保存的计划"), title="计划进度"))
+        plan.add_row(_plain(index), _status(step.status), _plain(step.description, 1000))
+    sections.append(_panel(plan if state.plan else Text("尚无已保存的计划"), title="计划进度"))
     if state.plan_revisions:
         sections.append(
-            Panel(
+            _panel(
                 Group(*[_plain(f"• {revision}", 1000) for revision in state.plan_revisions]),
                 title="根据观察调整计划",
             )
         )
 
-    timeline = Table("#", "工具与参数", "实际观察", expand=True)
+    timeline = Table(
+        "#", "工具与参数", "实际观察", expand=True, box=box.SIMPLE, header_style="dim", leading=1
+    )
     for index, event in enumerate(state.tool_history, 1):
-        proposal = Group(_plain(f"{event.name} · {event.call_id}"), _snippet(event.arguments))
+        proposal = Group(_plain(event.name), _plain(event.call_id), _arguments(event.arguments))
         if event.result is None:
-            observation: RenderableType = Text("INFLIGHT · 尚无完成记录，结果可能不确定")
+            observation: RenderableType = Text(
+                "INFLIGHT · 尚无完成记录，结果可能不确定", style="yellow"
+            )
         else:
             result = event.result
             if result.get("ok") is True:
                 data = result.get("data", {})
                 label = "PREVIEW · 未写入" if data.get("preview") is True else "OK"
-                observation = Group(Text(label), _snippet(data, 360))
+                observation = Group(
+                    Text(label, style="yellow" if data.get("preview") else "green"),
+                    _observation(event.name, data),
+                )
             else:
                 error = result.get("error") or {}
                 observation = Group(
-                    _plain(f"ERROR · {error.get('code', 'UNKNOWN')}"),
+                    Text("ERROR", style="red"),
+                    _plain(error.get("code", "UNKNOWN")),
                     _plain(error.get("message", ""), 360),
                 )
         timeline.add_row(_plain(index), proposal, observation)
     sections.append(
-        Panel(timeline if state.tool_history else Text("尚无工具调用记录"), title="工具调用时间线")
+        _panel(timeline if state.tool_history else Text("尚无工具调用记录"), title="工具调用时间线")
     )
 
-    artifacts = Table("文件", "SHA-256", expand=True)
+    artifacts = Table("文件", "SHA-256", expand=True, box=box.SIMPLE, header_style="dim")
+    for column in artifacts.columns:
+        column.overflow = "fold"
     verified = _verified_artifacts(state)
     for path, digest in verified:
         artifacts.add_row(_plain(path), _plain(digest))
     sections.append(
-        Panel(
+        _panel(
             artifacts if verified else Text("无已核验的写入产物；预览不代表文件已创建。"),
             title="写入时已核验的产物",
         )
     )
     if state.errors:
         sections.append(
-            Panel(Group(*[_snippet(error, 500) for error in state.errors]), title="已记录的错误")
+            _panel(Group(*[_snippet(error, 500) for error in state.errors]), title="已记录的错误")
         )
     sections.append(
-        Panel(
+        _panel(
             _plain(state.final_result, 8000) if state.final_result else Text("尚无最终结果文本"),
             title="最终结果文本（产物以核验证据为准）",
         )

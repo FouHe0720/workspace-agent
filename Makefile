@@ -2,7 +2,7 @@ SHELL := /bin/bash
 PY := .venv/bin/python
 AGENT := .venv/bin/agent
 
-.PHONY: install lint test demo mcp-demo check docker
+.PHONY: install lint test demo campus-demo mcp-demo check docker
 
 install:
 	bash scripts/install.sh
@@ -16,6 +16,9 @@ test:
 
 demo:
 	bash scripts/demo.sh
+
+campus-demo:
+	bash scripts/campus_demo.sh
 
 mcp-demo:
 	$(AGENT) mcp-demo --workspace demo_workspace

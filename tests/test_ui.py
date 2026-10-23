@@ -1,6 +1,7 @@
 """The terminal view displays persisted facts and never creates execution facts."""
 
 import hashlib
+import re
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,9 +17,9 @@ from workspace_agent.store import RunStore
 from workspace_agent.tools import ToolDispatcher
 
 
-def rendered(state: TaskState) -> str:
+def rendered(state: TaskState, width: int = 220) -> str:
     stream = StringIO()
-    Console(file=stream, width=220, color_system=None, force_terminal=False).print(
+    Console(file=stream, width=width, color_system=None, force_terminal=False).print(
         ui.render_state(state)
     )
     return stream.getvalue()
@@ -324,3 +325,12 @@ def test_ctrl_c_stops_viewing_without_recovering_or_mutating_inflight_state(
     assert "结果可能不确定" in output.getvalue()
     assert "已停止查看" in output.getvalue()
     assert store.load(state.run_id).model_dump() == state.model_dump()
+
+
+def test_narrow_terminal_wraps_verified_digest_without_losing_characters() -> None:
+    event = verified_write()
+    state = TaskState(goal="verify artifact", workspace="sandbox", tool_history=[event])
+    output = artifact_section(rendered(state, width=60))
+    compact = re.sub(r"[\s│]", "", output)
+    assert event.result["data"]["sha256"] in compact
+    assert "…" not in output
